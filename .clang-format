@@ -22,7 +22,7 @@ EmptyLineAfterAccessModifier: Never
 NamespaceIndentation: None
 BreakConstructorInitializers: BeforeComma
 
-SortIncludes: Never
+SortIncludes: true
 
 BracedInitializerIndentWidth: 2
 ConstructorInitializerIndentWidth: 2
