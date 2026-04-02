@@ -17,16 +17,11 @@ fs::path make_temp_db_file(const std::string& suffix) {
     const auto base = fs::temp_directory_path();
     return base / ("tritiongb_pagemanager_" + suffix + ".db");
 }
-
-void remove_file_safely(const fs::path& file) {
-    std::error_code ec;
-    fs::remove(file, ec);
-}
 }   // namespace
 
 TEST(PageManager, WriteThenReadSameBytes) {
     const auto file = make_temp_db_file("write_read");
-    remove_file_safely(file);
+    fs::remove(file);
 
     {
         PageManager pm(file);
@@ -44,12 +39,12 @@ TEST(PageManager, WriteThenReadSameBytes) {
         EXPECT_EQ(in.id, out.id);
         EXPECT_EQ(in.data, out.data);
     }
-    remove_file_safely(file);
+    fs::remove(file);
 }
 
 TEST(PageManager, ReopenFileDataPersists) {
     const auto file = make_temp_db_file("reopen");
-    remove_file_safely(file);
+    fs::remove(file);
 
     PageId id {};
     {
@@ -74,12 +69,12 @@ TEST(PageManager, ReopenFileDataPersists) {
         EXPECT_EQ(in.data[kPageSize - 1], std::byte { 0xEF });
     }
 
-    remove_file_safely(file);
+    fs::remove(file);
 }
 
 TEST(PageManager, AllocReturnsUniqueIds) {
     const auto file = make_temp_db_file("alloc_unique");
-    remove_file_safely(file);
+    fs::remove(file);
     {
         PageManager pm(file);
 
@@ -95,5 +90,5 @@ TEST(PageManager, AllocReturnsUniqueIds) {
         EXPECT_EQ(b, 1);
         EXPECT_EQ(c, 2);
     }
-    remove_file_safely(file);
+    fs::remove(file);
 }
