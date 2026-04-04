@@ -1,32 +1,54 @@
 #pragma once
 
 #include <filesystem>
-#include <fstream>
+#include <memory>
+#include <vector>
 
 #include "Page.h"
 
 namespace tritondb::storage {
 
-class PageManager {
+class IPageManager {
 public:
-    explicit PageManager(std::filesystem::path file_path);
-    ~PageManager() = default;
+    virtual ~IPageManager() = default;
 
-    PageManager(const PageManager&) = delete;
-    PageManager& operator=(const PageManager&) = delete;
+    virtual PageId alloc(PageType type) = 0;
 
-    PageManager(PageManager&&) = delete;
+    virtual Page read(PageId id) const = 0;
 
-    [[nodiscard]] PageId alloc();
-    void write(const Page& page);
-    [[nodiscard]] Page read(PageId id) const;
+    virtual void write(PageId id, Page page) = 0;
+
+    virtual void free(PageId id) = 0;
+
+    virtual void sync() = 0;
+
+    virtual uint64_t pageCount() const noexcept = 0;
+};
+
+class PageManager final : public IPageManager {
+public:
+    static std::unique_ptr<PageManager> open(const std::filesystem::path& path);
+
+    ~PageManager() override;
+
+    PageId alloc(PageType type) override;
+    Page read(PageId id) const override;
+    void write(PageId id, Page page) override;
+    void free(PageId id) override;
+    void sync() override;
+    uint64_t pageCount() const noexcept override;
 
 private:
-    std::filesystem::path file_path_;
-    mutable std::fstream file_;
+    explicit PageManager(int fd, uint64_t pageCount);
 
-    std::uint64_t page_count() const;
-    void ensure_open() const;
+    int fd_;
+    uint64_t pageCount_;
+
+    std::vector<PageId> freeList_;
+
+    off_t offsetOf(PageId id) const noexcept;
+    void loadFreeList();
+    void persistFreeList();
 };
 
 }   // namespace tritondb::storage

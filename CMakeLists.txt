@@ -1,7 +1,9 @@
-cmake_minimum_required(VERSION 4.3)
+cmake_minimum_required(VERSION 4.0)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 project(tritondb)
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
 
 include(FetchContent)
 
