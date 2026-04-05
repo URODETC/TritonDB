@@ -2,44 +2,45 @@
 #include "storage/PageManager.h"
 
 #include <filesystem>
+#include <algorithm>
 #include <fstream>
 
 using namespace tritondb::storage;
 
 class PageManagerTest : public ::testing::Test {
 protected:
-    std::filesystem::path dbPath;
+    std::filesystem::path dbPath_;
 
     void SetUp() override {
-        dbPath = std::filesystem::temp_directory_path() / "tritondb_pm_test.db";
-        std::filesystem::remove(dbPath); // чистый старт
+        dbPath_ = std::filesystem::temp_directory_path() / "tritondb_pm_test.db";
+        std::filesystem::remove(dbPath_);
     }
 
     void TearDown() override {
-        std::filesystem::remove(dbPath);
+        std::filesystem::remove(dbPath_);
     }
 };
 
 TEST_F(PageManagerTest, OpenCreatesFile) {
-    auto pm = PageManager::open(dbPath);
-    ASSERT_TRUE(std::filesystem::exists(dbPath));
+    auto pm = PageManager::open(dbPath_);
+    ASSERT_TRUE(std::filesystem::exists(dbPath_));
 }
 
 TEST_F(PageManagerTest, AllocReturnsValidPageId) {
-    auto pm = PageManager::open(dbPath);
+    auto pm = PageManager::open(dbPath_);
     PageId id = pm->alloc(PageType::TreeLeaf);
     EXPECT_NE(id, kInvalidPageId);
 }
 
 TEST_F(PageManagerTest, AllocIncreasesPageCount) {
-    auto pm = PageManager::open(dbPath);
+    auto pm = PageManager::open(dbPath_);
     uint64_t before = pm->pageCount();
     pm->alloc(PageType::TreeLeaf);
     EXPECT_EQ(pm->pageCount(), before + 1);
 }
 
 TEST_F(PageManagerTest, AllocMultipleReturnsUniqueIds) {
-    auto pm = PageManager::open(dbPath);
+    auto pm = PageManager::open(dbPath_);
     constexpr int N = 100;
     std::vector<PageId> ids;
     for (int i = 0; i < N; ++i) {
@@ -50,7 +51,7 @@ TEST_F(PageManagerTest, AllocMultipleReturnsUniqueIds) {
 }
 
 TEST_F(PageManagerTest, WriteAndReadRoundtrip) {
-    auto pm = PageManager::open(dbPath);
+    auto pm = PageManager::open(dbPath_);
     PageId id = pm->alloc(PageType::TreeLeaf);
 
     Page p = pm->read(id);
@@ -64,7 +65,7 @@ TEST_F(PageManagerTest, WriteAndReadRoundtrip) {
 }
 
 TEST_F(PageManagerTest, ReadPreservesPageType) {
-    auto pm = PageManager::open(dbPath);
+    auto pm = PageManager::open(dbPath_);
     PageId id = pm->alloc(PageType::TreeInner);
 
     Page p = pm->read(id);
@@ -74,7 +75,7 @@ TEST_F(PageManagerTest, ReadPreservesPageType) {
 TEST_F(PageManagerTest, DataPersistsAfterReopen) {
     PageId id;
     {
-        auto pm = PageManager::open(dbPath);
+        auto pm = PageManager::open(dbPath_);
         id = pm->alloc(PageType::TreeLeaf);
 
         Page p = pm->read(id);
@@ -83,7 +84,7 @@ TEST_F(PageManagerTest, DataPersistsAfterReopen) {
         pm->sync();
     }
     {
-        auto pm = PageManager::open(dbPath);
+        auto pm = PageManager::open(dbPath_);
         Page p = pm->read(id);
         EXPECT_EQ(p.data[42], std::byte{0xFF});
     }
@@ -92,20 +93,20 @@ TEST_F(PageManagerTest, DataPersistsAfterReopen) {
 TEST_F(PageManagerTest, PageCountPersistsAfterReopen) {
     uint64_t countBefore;
     {
-        auto pm = PageManager::open(dbPath);
+        auto pm = PageManager::open(dbPath_);
         pm->alloc(PageType::TreeLeaf);
         pm->alloc(PageType::TreeLeaf);
         pm->sync();
         countBefore = pm->pageCount();
     }
     {
-        auto pm = PageManager::open(dbPath);
+        auto pm = PageManager::open(dbPath_);
         EXPECT_EQ(pm->pageCount(), countBefore);
     }
 }
 
 TEST_F(PageManagerTest, FreedPageIsReused) {
-    auto pm = PageManager::open(dbPath);
+    auto pm = PageManager::open(dbPath_);
     PageId id1 = pm->alloc(PageType::TreeLeaf);
     pm->free(id1);
     PageId id2 = pm->alloc(PageType::TreeLeaf);
@@ -116,25 +117,25 @@ TEST_F(PageManagerTest, FreedPageIsReused) {
 TEST_F(PageManagerTest, FreeListPersistsAfterReopen) {
     PageId freed;
     {
-        auto pm = PageManager::open(dbPath);
+        auto pm = PageManager::open(dbPath_);
         freed = pm->alloc(PageType::TreeLeaf);
         pm->free(freed);
         pm->sync();
     }
     {
-        auto pm = PageManager::open(dbPath);
+        auto pm = PageManager::open(dbPath_);
         PageId reused = pm->alloc(PageType::TreeLeaf);
         EXPECT_EQ(freed, reused);
     }
 }
 
 TEST_F(PageManagerTest, ReadThrowsOnCorruptedChecksum) {
-    auto pm = PageManager::open(dbPath);
+    auto pm = PageManager::open(dbPath_);
     PageId id = pm->alloc(PageType::TreeLeaf);
     pm->sync();
 
     {
-        std::fstream f(dbPath, std::ios::in | std::ios::out | std::ios::binary);
+        std::fstream f(dbPath_, std::ios::in | std::ios::out | std::ios::binary);
         off_t offset = static_cast<off_t>(id) * kPageSize + kPageHeaderSize;
         f.seekp(offset);
         char garbage = 0xDE;

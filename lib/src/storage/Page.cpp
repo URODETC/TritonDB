@@ -40,14 +40,16 @@ namespace tritondb::storage {
 void Page::clear(const PageType type) noexcept {
     data.fill(static_cast<std::byte>(0));
     header.type = type;
+    header.reserved = 0;
+    header.lsn = 0;
+    updateChecksum();
 }
 void Page::updateChecksum() noexcept {
     uint16_t crc16 = calculateCrc16(data);
     header.checksum = crc16;
 }
 bool Page::verifyChecksum() noexcept {
-    uint16_t crc16 = calculateCrc16(data);
-    return crc16 == header.checksum;
+    return calculateCrc16(data) == header.checksum;
 }
 
 }   // namespace tritondb::storage

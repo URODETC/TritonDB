@@ -17,6 +17,8 @@ enum class PageType : uint8_t {
     Free = 0,
     TreeInner = 1,
     TreeLeaf = 2,
+    WalSegment = 3,
+    FreeList = 4,
 };
 
 struct PageHeader {
