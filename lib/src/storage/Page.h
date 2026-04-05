@@ -15,8 +15,8 @@ inline constexpr PageId kInvalidPageId = UINT64_MAX;
 
 enum class PageType : uint8_t {
     Free = 0,
-    TreeInner = 1,
-    TreeLeaf = 2,
+    BTreeInner = 1,
+    BTreeLeaf = 2,
     WalSegment = 3,
     FreeList = 4,
 };

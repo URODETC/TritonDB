@@ -128,7 +128,7 @@ std::unique_ptr<PageManager> PageManager::open(const std::filesystem::path& path
     return pm;
 }
 
-off_t PageManager::offsetOf(PageId id) const noexcept {
+off_t PageManager::offsetOf(PageId id) noexcept {
     return static_cast<off_t>(id) * static_cast<off_t>(kPageSize);
 }
 

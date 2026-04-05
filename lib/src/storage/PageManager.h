@@ -61,7 +61,7 @@ private:
     [[nodiscard]] PageId popFree();
     void pushFree(PageId id);
     [[nodiscard]] PageId extendFile();
-    [[nodiscard]] off_t offsetOf(PageId id) const noexcept;
+    [[nodiscard]] static off_t offsetOf(PageId id) noexcept;
 
     void loadHead();
 };
