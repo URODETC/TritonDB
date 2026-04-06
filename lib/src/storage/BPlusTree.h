@@ -65,8 +65,8 @@ private:
         BTreeKey separator;
         PageId newPageId;
     };
-    SplitResult splitLeafImpl(PageId leafId, void* node);
-    SplitResult splitInnerImpl(PageId innerId, void* node);
+    SplitResult splitLeafImpl(PageId leafId, void* nodePtr);
+    SplitResult splitInnerImpl(PageId innerId, void* nodePtr);
 
     std::optional<SplitResult> insertIntoLeaf(PageId leafId, BTreeKey key, std::span<const std::byte> value);
     std::optional<SplitResult> insertIntoInner(PageId parentId, BTreeKey separator, PageId newChild);

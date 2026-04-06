@@ -1,20 +1,20 @@
 #include <gtest/gtest.h>
-#include "storage/BPlusTree.h"
-#include "storage/PageManager.h"
 
 #include <algorithm>
 #include <filesystem>
 #include <numeric>
 #include <random>
 
-using namespace tritondb::storage;
+#include "storage/BPlusTree.h"
+#include "storage/PageManager.h"
 
+using namespace tritondb::storage;
 
 class BPlusTreeTest : public ::testing::Test {
 protected:
     std::filesystem::path dbPath;
     std::unique_ptr<PageManager> pm;
-    std::unique_ptr<IBPlusTree>  tree;
+    std::unique_ptr<IBPlusTree> tree;
     PageId rootPageId;
 
     void SetUp() override {
@@ -32,7 +32,8 @@ protected:
     }
 
     void insertUint(BTreeKey key, uint64_t val) {
-        auto bytes = std::as_bytes(std::span{&val, 1});
+        std::vector<std::byte> bytes(sizeof(val));
+        std::memcpy(bytes.data(), &val, sizeof(val));
         tree->insert(key, bytes);
     }
 
@@ -42,7 +43,6 @@ protected:
         return result;
     }
 };
-
 
 TEST_F(BPlusTreeTest, NewTreeIsEmpty) {
     EXPECT_EQ(tree->size(), 0u);
@@ -56,9 +56,7 @@ TEST_F(BPlusTreeTest, InsertOneAndFind) {
     EXPECT_EQ(readUint(*result), 1000u);
 }
 
-TEST_F(BPlusTreeTest, FindMissingKeyReturnsNullopt) {
-    EXPECT_FALSE(tree->find(999).has_value());
-}
+TEST_F(BPlusTreeTest, FindMissingKeyReturnsNullopt) { EXPECT_FALSE(tree->find(999).has_value()); }
 
 TEST_F(BPlusTreeTest, InsertUpdatesExistingKey) {
     insertUint(1, 100);
@@ -78,7 +76,6 @@ TEST_F(BPlusTreeTest, InsertIncrementsSize) {
     EXPECT_EQ(tree->size(), 2u);
 }
 
-
 TEST_F(BPlusTreeTest, RemoveExistingKey) {
     insertUint(5, 50);
     tree->remove(5);
@@ -86,10 +83,7 @@ TEST_F(BPlusTreeTest, RemoveExistingKey) {
     EXPECT_EQ(tree->size(), 0u);
 }
 
-TEST_F(BPlusTreeTest, RemoveMissingKeyDoesNotThrow) {
-    EXPECT_NO_THROW(tree->remove(999));
-}
-
+TEST_F(BPlusTreeTest, RemoveMissingKeyDoesNotThrow) { EXPECT_NO_THROW(tree->remove(999)); }
 
 TEST_F(BPlusTreeTest, InsertManyKeysAllFound) {
     constexpr int N = 1000;
@@ -131,7 +125,6 @@ TEST_F(BPlusTreeTest, TreeGrowsInHeight) {
     EXPECT_GT(tree->height(), initialHeight);
 }
 
-
 TEST_F(BPlusTreeTest, RangeScanReturnsCorrectSubset) {
     for (BTreeKey k = 0; k < 20; ++k) insertUint(k, k);
 
@@ -143,11 +136,11 @@ TEST_F(BPlusTreeTest, RangeScanReturnsCorrectSubset) {
 
     ASSERT_EQ(found.size(), 5u);
     EXPECT_EQ(found.front(), 5u);
-    EXPECT_EQ(found.back(),  9u);
+    EXPECT_EQ(found.back(), 9u);
 }
 
 TEST_F(BPlusTreeTest, RangeScanIsAscending) {
-    for (BTreeKey k : {10u, 1u, 5u, 8u, 3u}) insertUint(k, k);
+    for (BTreeKey k : { 10u, 1u, 5u, 8u, 3u }) insertUint(k, k);
 
     std::vector<BTreeKey> found;
     tree->rangeScan(1, 11, [&](const BTreeEntry& e) {
@@ -169,7 +162,7 @@ TEST_F(BPlusTreeTest, RangeScanCanBeInterrupted) {
 }
 
 TEST_F(BPlusTreeTest, ScanAllReturnsAllInOrder) {
-    for (BTreeKey k : {3u, 1u, 4u, 1u, 5u, 9u, 2u, 6u}) insertUint(k, k);
+    for (BTreeKey k : { 3u, 1u, 4u, 1u, 5u, 9u, 2u, 6u }) insertUint(k, k);
 
     std::vector<BTreeKey> found;
     tree->scan([&](const BTreeEntry& e) {
@@ -179,7 +172,6 @@ TEST_F(BPlusTreeTest, ScanAllReturnsAllInOrder) {
     EXPECT_TRUE(std::is_sorted(found.begin(), found.end()));
     EXPECT_EQ(std::adjacent_find(found.begin(), found.end()), found.end());
 }
-
 
 TEST_F(BPlusTreeTest, DataPersistsAfterReopen) {
     constexpr int N = 200;
@@ -197,7 +189,6 @@ TEST_F(BPlusTreeTest, DataPersistsAfterReopen) {
         EXPECT_EQ(readUint(*res), static_cast<uint64_t>(i * 7));
     }
 }
-
 
 TEST_F(BPlusTreeTest, DeleteManyKeysTreeStaysConsistent) {
     constexpr int N = 500;
