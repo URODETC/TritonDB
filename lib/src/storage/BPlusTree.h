@@ -75,8 +75,16 @@ private:
 
     void updateRootMeta();
 
-    void rebalanceLeaf(const SearchPath& path);
-    void rebalanceInner(const SearchPath& path);
+    bool rebalanceLeaf(const SearchPath& path);
+    bool rebalanceInner(const SearchPath& path);
+
+    bool redistributeLeaf(PageId nodeId, std::size_t nodeIdx, void* parentPtr, PageId parentId, bool parentIsRoot);
+    bool redistributeInner(PageId nodeId, std::size_t nodeIdx, void* parentPtr, PageId parentId, bool parentIsRoot);
+
+    PageId mergeLeaf(PageId nodeId, std::size_t nodeIdx, void* parentPtr);
+    PageId mergeInner(PageId nodeId, std::size_t nodeIdx, void* parentPtr);
+
+    void collapseRoot();
 };
 
 inline constexpr std::size_t kLeafMaxEntries = 200;

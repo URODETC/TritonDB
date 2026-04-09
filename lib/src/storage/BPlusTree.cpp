@@ -37,6 +37,11 @@ inline constexpr uint16_t kInnerMinKeys = kInnerMaxKeys / 2;
 inline constexpr uint32_t kBTreeMagic = 0x54444200U;
 inline constexpr uint16_t kMetaSize = 16;
 
+static uint16_t innerMaxKeysForNode(bool isRoot) noexcept {
+    // Root stores extra tree metadata in-page, which costs one inner entry slot.
+    return isRoot ? static_cast<uint16_t>(kInnerMaxKeys - 1) : kInnerMaxKeys;
+}
+
 struct LeafSlot {
     BTreeKey key;
     uint16_t valOffset;   // смещение от начална data.
@@ -278,7 +283,7 @@ std::optional<BPlusTree::SplitResult> BPlusTree::insertIntoInner(PageId parentId
     node.keys.insert(it, separator);
     node.ptrs.insert(node.ptrs.begin() + static_cast<std::ptrdiff_t>(pos) + 1, newChild);
 
-    if (node.keys.size() <= kInnerMaxKeys) {
+    if (node.keys.size() <= innerMaxKeysForNode(is_root)) {
         serializeInner(node, page, is_root);
         pm_.write(parentId, page);
         return std::nullopt;
@@ -504,12 +509,266 @@ void BPlusTree::remove(BTreeKey key) {
     pm_.write(path.leafId, page);
 
     if (!path.ancestors.empty() && node.slots.empty()) {
-        rebalanceLeaf(path);
+        bool needs_inner_rebalance = rebalanceLeaf(path);
+
+        // If parent underflowed after a leaf merge, continue rebalancing upwards.
+        for (std::size_t level = path.ancestors.size(); needs_inner_rebalance && level > 1; --level) {
+            SearchPath inner_path;
+            inner_path.leafId = path.ancestors[level - 1];
+            inner_path.ancestors.assign(
+                path.ancestors.begin(), path.ancestors.begin() + static_cast<std::ptrdiff_t>(level - 1));
+            needs_inner_rebalance = rebalanceInner(inner_path);
+        }
     }
     updateRootMeta();
 }
-// TODO: текущая реализация хуйня сделать нормальный merge/redistribution
-void BPlusTree::rebalanceLeaf(const SearchPath& path) {
+
+static bool leafUnderfull(const LeafNode& node) noexcept {
+    int capacity = static_cast<int>(kPageDataSize) - kLeafHeaderSize;
+    return node.freeBytes() > capacity / 2;
+}
+
+static bool innerUnderfull(const InnerNode& node) noexcept { return node.keys.size() < kInnerMinKeys; }
+
+bool BPlusTree::redistributeLeaf(
+    PageId nodeId, std::size_t nodeIdx, void* parentPtr, PageId parentId, bool parentIsRoot) {
+    auto& parent = *static_cast<InnerNode*>(parentPtr);
+
+    if (nodeIdx + 1 < parent.ptrs.size()) {
+        PageId right_id = parent.ptrs[nodeIdx + 1];
+        Page right_page = pm_.read(right_id);
+        LeafNode right = deserializeLeaf(right_page, false);
+        if (!leafUnderfull(right) && right.slots.size() > 1) {
+            Page left_page = pm_.read(nodeId);
+            LeafNode left = deserializeLeaf(left_page, (nodeId == root_page_id_));
+
+            LeafSlot donated = right.slots.front();
+            BTreeValue val = right.valueAt(0);
+            right.slots.erase(right.slots.begin());
+
+            std::size_t raw_end = kPageDataSize - left.usedValueBytes() - val.size();
+            std::ranges::copy(val, left.raw.data() + raw_end);
+            donated.valOffset = static_cast<uint16_t>(raw_end);
+            left.slots.push_back(donated);
+            parent.keys[nodeIdx] = right.slots.front().key;
+
+            serializeLeaf(left, left_page, (nodeId == root_page_id_));
+            serializeLeaf(right, right_page, false);
+            pm_.write(nodeId, left_page);
+            pm_.write(right_id, right_page);
+
+            Page parent_page = pm_.read(parentId);
+            serializeInner(parent, parent_page, parentIsRoot);
+            pm_.write(parentId, parent_page);
+            return true;
+        }
+    }
+    if (nodeIdx > 0) {
+        PageId left_id = parent.ptrs[nodeIdx - 1];
+        Page left_page = pm_.read(left_id);
+        LeafNode left = deserializeLeaf(left_page, false);
+        if (!leafUnderfull(left) && left.slots.size() > 1) {
+            Page right_page = pm_.read(nodeId);
+            LeafNode right = deserializeLeaf(right_page, false);
+
+            LeafSlot donated = left.slots.back();
+            BTreeValue val = left.valueAt(left.slots.size() - 1);
+            left.slots.pop_back();
+
+            std::size_t raw_end = kPageDataSize - right.usedValueBytes() - val.size();
+            std::ranges::copy(val, right.raw.data() + raw_end);
+            donated.valOffset = static_cast<uint16_t>(raw_end);
+            right.slots.insert(right.slots.begin(), donated);
+            parent.keys[nodeIdx - 1] = right.slots.front().key;
+
+            serializeLeaf(left, left_page, (left_id == root_page_id_));
+            serializeLeaf(right, right_page, false);
+            pm_.write(left_id, left_page);
+            pm_.write(nodeId, right_page);
+
+            Page parent_page = pm_.read(parentId);
+            serializeInner(parent, parent_page, parentIsRoot);
+            pm_.write(parentId, parent_page);
+            return true;
+        }
+    }
+    return false;
+}
+
+PageId BPlusTree::mergeLeaf(PageId nodeId, std::size_t nodeIdx, void* parentPtr) {
+    auto& parent = *static_cast<InnerNode*>(parentPtr);
+
+    PageId left_id;
+    PageId right_id;
+    std::size_t sep_idx;
+
+    if (nodeIdx + 1 < parent.ptrs.size()) {
+        left_id = nodeId;
+        right_id = parent.ptrs[nodeIdx + 1];
+        sep_idx = nodeIdx;
+    } else {
+        left_id = parent.ptrs[nodeIdx - 1];
+        right_id = nodeId;
+        sep_idx = nodeIdx - 1;
+    }
+    Page left_page = pm_.read(left_id);
+    Page right_page = pm_.read(right_id);
+
+    LeafNode left = deserializeLeaf(left_page, (left_id == root_page_id_));
+    LeafNode right = deserializeLeaf(right_page, (right_id == root_page_id_));
+
+    for (std::size_t i = 0; i < right.slots.size(); i++) {
+        LeafSlot s = right.slots[i];
+        BTreeValue v = right.valueAt(i);
+        std::size_t raw_end = kPageDataSize - left.usedValueBytes() - v.size();
+        std::ranges::copy(v, left.raw.data() + raw_end);
+        s.valOffset = static_cast<uint16_t>(raw_end);
+        left.slots.push_back(s);
+    }
+
+    left.next = right.next;
+    if (right.next != kInvalidPageId) {
+        Page next_page = pm_.read(right.next);
+        bool next_is_root = (right.next == root_page_id_);
+        LeafNode next = deserializeLeaf(next_page, next_is_root);
+        next.prev = left_id;
+        serializeLeaf(next, next_page, next_is_root);
+        pm_.write(right.next, next_page);
+    }
+    serializeLeaf(left, left_page, (left_id == root_page_id_));
+    pm_.write(left_id, left_page);
+
+    parent.keys.erase(parent.keys.begin() + static_cast<std::ptrdiff_t>(sep_idx));
+    parent.ptrs.erase(parent.ptrs.begin() + static_cast<std::ptrdiff_t>(sep_idx) + 1);
+
+    pm_.free(right_id);
+    return right_id;
+}
+
+bool BPlusTree::redistributeInner(
+    PageId nodeId, std::size_t nodeIdx, void* parentPtr, PageId parentId, bool parentIsRoot) {
+    auto& parent = *static_cast<InnerNode*>(parentPtr);
+
+    if (nodeIdx + 1 < parent.ptrs.size()) {
+        PageId right_id = parent.ptrs[nodeIdx + 1];
+        Page right_page = pm_.read(right_id);
+        InnerNode right = deserializeInner(right_page, false);
+
+        if (right.keys.size() > kInnerMinKeys) {
+            Page left_page = pm_.read(nodeId);
+            InnerNode left = deserializeInner(left_page, (nodeId == root_page_id_));
+
+            left.keys.push_back(parent.keys[nodeIdx]);
+            left.ptrs.push_back(right.ptrs.front());
+            parent.keys[nodeIdx] = right.keys.front();
+            right.keys.erase(right.keys.begin());
+            right.ptrs.erase(right.ptrs.begin());
+            serializeInner(left, left_page, (nodeId == root_page_id_));
+            serializeInner(right, right_page, false);
+            pm_.write(nodeId, left_page);
+            pm_.write(right_id, right_page);
+
+            Page parent_page = pm_.read(parentId);
+            serializeInner(parent, parent_page, parentIsRoot);
+            pm_.write(parentId, parent_page);
+
+            return true;
+        }
+    }
+    if (nodeIdx > 0) {
+        PageId left_id = parent.ptrs[nodeIdx - 1];
+        Page left_page = pm_.read(left_id);
+        InnerNode left = deserializeInner(left_page, (left_id == root_page_id_));
+
+        if (left.keys.size() > kInnerMinKeys) {
+            Page right_page = pm_.read(nodeId);
+            InnerNode right = deserializeInner(right_page, false);
+
+            right.keys.insert(right.keys.begin(), parent.keys[nodeIdx - 1]);
+            right.ptrs.insert(right.ptrs.begin(), left.ptrs.back());
+            parent.keys[nodeIdx - 1] = left.keys.back();
+            left.keys.pop_back();
+            left.ptrs.pop_back();
+            serializeInner(left, left_page, (left_id == root_page_id_));
+            serializeInner(right, right_page, false);
+            pm_.write(left_id, left_page);
+            pm_.write(nodeId, right_page);
+
+            Page parent_page = pm_.read(parentId);
+            serializeInner(parent, parent_page, parentIsRoot);
+            pm_.write(parentId, parent_page);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+PageId BPlusTree::mergeInner(PageId nodeId, std::size_t nodeIdx, void* parentPtr) {
+    auto& parent = *static_cast<InnerNode*>(parentPtr);
+
+    PageId left_id;
+    PageId right_id;
+    std::size_t sep_idx;
+
+    if (nodeIdx + 1 < parent.ptrs.size()) {
+        left_id = nodeId;
+        right_id = parent.ptrs[nodeIdx + 1];
+        sep_idx = nodeIdx;
+    } else {
+        left_id = parent.ptrs[nodeIdx - 1];
+        right_id = nodeId;
+        sep_idx = nodeIdx - 1;
+    }
+
+    Page left_page = pm_.read(left_id);
+    Page right_page = pm_.read(right_id);
+    InnerNode left = deserializeInner(left_page, (left_id == root_page_id_));
+    InnerNode right = deserializeInner(right_page, (right_id == root_page_id_));
+
+    left.keys.push_back(parent.keys[sep_idx]);
+
+    std::ranges::copy(right.keys, std::back_inserter(left.keys));
+    std::ranges::copy(right.ptrs, std::back_inserter(left.ptrs));
+
+    parent.keys.erase(parent.keys.begin() + static_cast<std::ptrdiff_t>(sep_idx));
+    parent.ptrs.erase(parent.ptrs.begin() + static_cast<std::ptrdiff_t>(sep_idx) + 1);
+
+    serializeInner(left, left_page, (left_id == root_page_id_));
+    pm_.write(left_id, left_page);
+
+    pm_.free(right_id);
+    return right_id;
+}
+
+void BPlusTree::collapseRoot() {
+    if (height_ <= 1)
+        return;
+
+    Page root_page = pm_.read(root_page_id_);
+    InnerNode root = deserializeInner(root_page, true);
+    if (root.ptrs.size() != 1)
+        return;
+    PageId only_child = root.ptrs[0];
+    Page child_page = pm_.read(only_child);
+    bool child_is_leaf = (child_page.header.type == PageType::BTreeLeaf);
+
+    if (child_is_leaf) {
+        LeafNode child = deserializeLeaf(child_page, false);
+        root_page.header.type = PageType::BTreeLeaf;
+        serializeLeaf(child, root_page, true);
+    } else {
+        InnerNode child = deserializeInner(child_page, false);
+        root_page.header.type = PageType::BTreeInner;
+        serializeInner(child, root_page, true);
+    }
+
+    pm_.write(root_page_id_, root_page);
+    pm_.free(only_child);
+    height_--;
+}
+
+bool BPlusTree::rebalanceLeaf(const SearchPath& path) {
     PageId leaf_id = path.leafId;
     PageId parent_id = path.ancestors.back();
     bool parent_is_root = (parent_id == root_page_id_);
@@ -519,74 +778,30 @@ void BPlusTree::rebalanceLeaf(const SearchPath& path) {
 
     auto pit = std::ranges::find(parent.ptrs, leaf_id);
     if (pit == parent.ptrs.end())
-        return;
+        return false;
 
-    std::size_t p_idx = static_cast<std::size_t>(std::ranges::distance(parent.ptrs.begin(), pit));
-    Page leaf_page = pm_.read(leaf_id);
-    bool leaf_is_root = (leaf_id == root_page_id_);
-    LeafNode leaf = deserializeLeaf(leaf_page, leaf_is_root);
+    std::size_t node_idx = static_cast<std::size_t>(std::ranges::distance(parent.ptrs.begin(), pit));
 
-    if (leaf.prev != kInvalidPageId) {
-        Page prev_page = pm_.read(leaf.prev);
-        bool prev_is_root = (leaf.prev == root_page_id_);
-        LeafNode prev_node = deserializeLeaf(prev_page, prev_is_root);
-        prev_node.next = leaf.next;
-        serializeLeaf(prev_node, prev_page, prev_is_root);
-        pm_.write(leaf.prev, prev_page);
-    }
-    if (leaf.next != kInvalidPageId) {
-        Page next_page = pm_.read(leaf.next);
-        bool next_is_root = (leaf.next == root_page_id_);
-        LeafNode next_node = deserializeLeaf(next_page, next_is_root);
-        next_node.prev = leaf.prev;
-        serializeLeaf(next_node, next_page, next_is_root);
-        pm_.write(leaf.next, next_page);
-    }
-    if (p_idx == 0) {
-        parent.keys.erase(parent.keys.begin());
-    } else {
-        parent.keys.erase(parent.keys.begin() + static_cast<std::ptrdiff_t>(p_idx) - 1);
-    }
-    parent.ptrs.erase(pit);
-    pm_.free(leaf_id);
-
-    if (parent.ptrs.size() - 1 && parent_is_root && height_ > 1) {
-        PageId only_child = parent.ptrs[0];
-        Page child_page = pm_.read(only_child);
-        bool child_is_leaf = (child_page.header.type == PageType::BTreeLeaf);
-
-        if (child_is_leaf) {
-            LeafNode child_leaf = deserializeLeaf(child_page, false);
-            Page root_page = pm_.read(root_page_id_);
-            root_page.header.type = PageType::BTreeLeaf;
-            serializeLeaf(child_leaf, root_page, true);
-            pm_.write(root_page_id_, root_page);
-        } else {
-            InnerNode child_inner = deserializeInner(child_page, false);
-            Page root_page = pm_.read(root_page_id_);
-            root_page.header.type = PageType::BTreeInner;
-            serializeInner(child_inner, root_page, true);
-            pm_.write(root_page_id_, root_page);
-        }
-        pm_.free(only_child);
-        height_--;
-        return;
+    if (redistributeLeaf(leaf_id, node_idx, &parent, parent_id, parent_is_root)) {
+        return false;
     }
 
+    mergeLeaf(leaf_id, node_idx, &parent);
+    parent_page = pm_.read(parent_id);
     serializeInner(parent, parent_page, parent_is_root);
     pm_.write(parent_id, parent_page);
 
-    if (parent.keys.empty() && !parent_is_root && path.ancestors.size() > 1) {
-        SearchPath parent_path;
-        parent_path.ancestors.assign(path.ancestors.begin(), path.ancestors.end() - 1);
-        parent_path.leafId = parent_id;
-        rebalanceInner(parent_path);
+    if (parent_is_root) {
+        collapseRoot();
+        return false;
     }
+
+    return innerUnderfull(parent);
 }
 
-void BPlusTree::rebalanceInner(const SearchPath& path) {
+bool BPlusTree::rebalanceInner(const SearchPath& path) {
     if (path.ancestors.empty())
-        return;
+        return false;
 
     PageId node_id = path.leafId;
     PageId parent_id = path.ancestors.back();
@@ -597,42 +812,24 @@ void BPlusTree::rebalanceInner(const SearchPath& path) {
 
     auto pit = std::ranges::find(parent.ptrs, node_id);
     if (pit == parent.ptrs.end())
-        return;
-    std::size_t p_idx = static_cast<std::size_t>(std::ranges::distance(parent.ptrs.begin(), pit));
+        return false;
+    std::size_t node_idx = static_cast<std::size_t>(std::ranges::distance(parent.ptrs.begin(), pit));
 
-    if (p_idx == 0) {
-        parent.keys.erase(parent.keys.begin());
-    } else {
-        parent.keys.erase(parent.keys.begin() + static_cast<ptrdiff_t>(p_idx) - 1);
-    }
-    parent.ptrs.erase(pit);
-    pm_.free(node_id);
-
-    if (parent.ptrs.size() - 1 && parent_is_root && height_ > 1) {
-        PageId only_child = parent.ptrs[0];
-        Page child_page = pm_.read(only_child);
-        bool child_is_leaf = (child_page.header.type == PageType::BTreeLeaf);
-
-        if (child_is_leaf) {
-            LeafNode child_leaf = deserializeLeaf(child_page, false);
-            Page root_page = pm_.read(root_page_id_);
-            root_page.header.type = PageType::BTreeLeaf;
-            serializeLeaf(child_leaf, root_page, true);
-            pm_.write(root_page_id_, root_page);
-        } else {
-            InnerNode child_inner = deserializeInner(child_page, false);
-            Page root_page = pm_.read(root_page_id_);
-            root_page.header.type = PageType::BTreeInner;
-            serializeInner(child_inner, root_page, true);
-            pm_.write(root_page_id_, root_page);
-        }
-        pm_.free(only_child);
-        height_--;
-        return;
+    if (redistributeInner(node_id, node_idx, &parent, parent_id, parent_is_root)) {
+        return false;
     }
 
+    mergeInner(node_id, node_idx, &parent);
+    parent_page = pm_.read(parent_id);
     serializeInner(parent, parent_page, parent_is_root);
     pm_.write(parent_id, parent_page);
+
+    if (parent_is_root) {
+        collapseRoot();
+        return false;
+    }
+
+    return innerUnderfull(parent);
 }
 
 void BPlusTree::scan(std::function<bool(const BTreeEntry&)> callback) const {
